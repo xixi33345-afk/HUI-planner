@@ -346,7 +346,7 @@ function renderProfilePage() {
         <div class="profile-section-title">☁️ 云端同步</div>
         <div class="cloud-sync-card">
           ${cloudUser ? `
-            <div class="sync-status-row"><span>账号：</span><span>${cloudUser.getEmail() || cloudUser.getUsername()}</span></div>
+            <div class="sync-status-row"><span>账号：</span><span>${localStorage.getItem('app_email') || cloudUser}</span></div>
             <div class="sync-status-row" id="syncStatusRow">
               <span>同步状态：</span><span id="syncStatusBadge">✓ 已登录，数据自动同步</span>
             </div>
