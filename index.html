@@ -17,10 +17,7 @@
   <script>window.Chart || document.write('<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"><\/script>')</script>
   <script>window.Chart || document.write('<script src="https://cdn.bootcdn.net/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"><\/script>')</script>
   <script>window.Chart || document.write('<script src="https://unpkg.com/chart.js@4.4.0/dist/chart.umd.min.js"><\/script>')</script>
-  <!-- LeanCloud Storage SDK：本地优先，CDN 多级降级 -->
-  <script src="js/vendor/av-min.js"></script>
-  <script>window.AV || document.write('<script src="https://cdn.jsdelivr.net/npm/leancloud-storage@4.15.2/dist/av-min.js"><\/script>')</script>
-  <script>window.AV || document.write('<script src="https://unpkg.com/leancloud-storage@4.15.2/dist/av-min.js"><\/script>')</script>
+  <!-- 云同步后端为同域名的 Cloudflare Pages Functions（/api），无需额外 SDK -->
 </head>
 <body>
 <div id="app">
@@ -77,7 +74,6 @@
 </svg>
 
 <!-- JS: load order matters -->
-<script src="js/cloud-config.js"></script>
 <script src="js/foods.js"></script>
 <script src="js/planner.js"></script>
 <script src="js/health.js"></script>

@@ -1,5 +1,5 @@
 // Service Worker for 健康打卡 PWA
-const CACHE_NAME = 'health-planner-v7';
+const CACHE_NAME = 'health-planner-v8';
 const ASSETS = [
   './',
   './index.html',
@@ -9,7 +9,6 @@ const ASSETS = [
   './icon-192.png',
   './icon-512.png',
   './css/style.css',
-  './js/cloud-config.js',
   './js/foods.js',
   './js/planner.js',
   './js/health.js',
@@ -39,6 +38,10 @@ self.addEventListener('fetch', e => {
   if (url.origin !== location.origin) {
     // CDN: try network, fall back to nothing (they're not cached)
     return;
+  }
+  // 云同步接口永远走网络，绝不缓存（否则会读到旧数据）
+  if (url.pathname.startsWith('/api/')) {
+    return; // 让浏览器正常发起网络请求
   }
   e.respondWith(
     caches.match(e.request).then(cached => {

@@ -30,63 +30,55 @@ let currentPlannerSubTab = 'checkin';
 let plannerInitialized = false;
 
 // ===================== CLOUD SYNC =====================
-// 基于 LeanCloud 邮箱+密码账号体系，登录后数据跨设备同步。
-// 应用凭证在 js/cloud-config.js 中配置。
+// 后端为同域名的 Cloudflare Pages Functions（/api），邮箱+密码登录，KV 存储。
+// 同源调用，无需配置；本地 file:// 打开时不可用（无 http 后端）。
 const CloudSync = {
   configured: false,
   pushTimer: null,
+  base: (typeof location !== 'undefined' ? location.origin : '') + '/api',
+  available: (typeof location !== 'undefined') && /^https?:$/.test(location.protocol),
 
   init() {
-    const cfg = (typeof CLOUD_CONFIG !== 'undefined') ? CLOUD_CONFIG : null;
-    if (!cfg || !cfg.appId || !cfg.appKey || !cfg.serverURL) {
-      this.updateStatus('offline');
-      return false;
-    }
-    try {
-      AV.init({ appId: cfg.appId, appKey: cfg.appKey, serverURL: cfg.serverURL });
-      this.configured = true;
-      return true;
-    } catch(e) {
-      console.error('LeanCloud init failed', e);
-      this.updateStatus('offline');
-      return false;
-    }
+    this.configured = this.available;
+    if (!this.available) this.updateStatus('offline');
+    return this.available;
   },
 
-  user() {
-    if (!this.configured) return null;
-    try { return AV.User.current(); } catch { return null; }
+  token() { return localStorage.getItem('app_token'); },
+  user() { return this.token() ? (localStorage.getItem('app_email') || '已登录') : null; },
+
+  async _req(path, opts = {}) {
+    const headers = Object.assign({ 'content-type': 'application/json' }, opts.headers || {});
+    const t = this.token();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch(this.base + path, Object.assign({}, opts, { headers }));
+    let j = {};
+    try { j = await r.json(); } catch {}
+    if (!r.ok) { const err = new Error(j.error || ('请求失败 ' + r.status)); err.status = r.status; throw err; }
+    return j;
   },
 
   async signup(email, password) {
-    const u = new AV.User();
-    u.setUsername(email);
-    u.setPassword(password);
-    u.setEmail(email);
-    await u.signUp();
+    const j = await this._req('/signup', { method: 'POST', body: JSON.stringify({ email, password }) });
+    localStorage.setItem('app_token', j.token);
+    localStorage.setItem('app_email', j.email);
   },
 
   async login(email, password) {
-    await AV.User.logIn(email, password);
+    const j = await this._req('/login', { method: 'POST', body: JSON.stringify({ email, password }) });
+    localStorage.setItem('app_token', j.token);
+    localStorage.setItem('app_email', j.email);
   },
 
   async logout() {
-    try { await AV.User.logOut(); } catch {}
+    localStorage.removeItem('app_token');
+    localStorage.removeItem('app_email');
     localStorage.removeItem('app_last_sync');
     localStorage.removeItem('app_sync_dirty');
     this.updateStatus('offline');
   },
 
-  errMsg(e) {
-    const map = {
-      202: '该邮箱已注册，请直接登录',
-      203: '该邮箱已被使用',
-      210: '密码错误',
-      211: '账号不存在，请先注册',
-      219: '尝试次数过多，请稍后再试'
-    };
-    return map[e?.code] || e?.rawMessage || e?.message || '操作失败，请重试';
-  },
+  errMsg(e) { return (e && e.message) || '操作失败，请重试'; },
 
   updateStatus(state) {
     const dot = document.getElementById('syncStatus');
@@ -97,36 +89,52 @@ const CloudSync = {
     txt.textContent = labels[state] || state;
   },
 
+  _collect() {
+    const planner = {
+      activities: JSON.parse(localStorage.getItem('planner_activities') || '[]'),
+      logs: JSON.parse(localStorage.getItem('planner_logs') || '{}'),
+      notes: JSON.parse(localStorage.getItem('planner_notes') || '{}'),
+      profile: JSON.parse(localStorage.getItem('planner_profile') || '{}')
+    };
+    const health = {};
+    ['weight','diet','exercise','goals','profile'].forEach(k => {
+      try { health[k] = JSON.parse(localStorage.getItem(`health_${k}`) || 'null'); } catch {}
+    });
+    let aiPlan = null;
+    try { aiPlan = JSON.parse(localStorage.getItem('app_ai_plan') || 'null'); } catch {}
+    return { planner, health, aiPlan, _t: Date.now() };
+  },
+
+  _apply(d) {
+    if (!d) return;
+    if (d.planner) {
+      const p = d.planner;
+      if (p.activities) localStorage.setItem('planner_activities', JSON.stringify(p.activities));
+      if (p.logs) localStorage.setItem('planner_logs', JSON.stringify(p.logs));
+      if (p.notes) localStorage.setItem('planner_notes', JSON.stringify(p.notes));
+      if (p.profile) localStorage.setItem('planner_profile', JSON.stringify(p.profile));
+    }
+    if (d.health) {
+      ['weight','diet','exercise','goals','profile'].forEach(k => {
+        if (d.health[k]) localStorage.setItem(`health_${k}`, JSON.stringify(d.health[k]));
+      });
+    }
+    if (d.aiPlan) localStorage.setItem('app_ai_plan', JSON.stringify(d.aiPlan));
+  },
+
   async pull() {
-    const user = this.user();
-    if (!user) return null;
+    if (!this.user()) return null;
     try {
       this.updateStatus('syncing');
-      const query = new AV.Query('AppData');
-      query.equalTo('owner', user);
-      const obj = await query.first();
-      if (obj) {
-        const cloudUpdatedAt = obj.updatedAt ? new Date(obj.updatedAt).getTime() : 0;
-        const localUpdatedAt = parseInt(localStorage.getItem('app_last_sync') || '0');
-        if (cloudUpdatedAt > localUpdatedAt) {
-          const plannerData = obj.get('plannerData');
-          const healthData2 = obj.get('healthData');
-          const aiPlan = obj.get('aiPlan');
-          if (plannerData) {
-            if (plannerData.activities) localStorage.setItem('planner_activities', JSON.stringify(plannerData.activities));
-            if (plannerData.logs) localStorage.setItem('planner_logs', JSON.stringify(plannerData.logs));
-            if (plannerData.notes) localStorage.setItem('planner_notes', JSON.stringify(plannerData.notes));
-            if (plannerData.profile) localStorage.setItem('planner_profile', JSON.stringify(plannerData.profile));
-          }
-          if (healthData2) {
-            ['weight','diet','exercise','goals','profile'].forEach(k => {
-              if (healthData2[k]) localStorage.setItem(`health_${k}`, JSON.stringify(healthData2[k]));
-            });
-          }
-          if (aiPlan) localStorage.setItem('app_ai_plan', JSON.stringify(aiPlan));
-          localStorage.setItem('app_last_sync', cloudUpdatedAt.toString());
+      const j = await this._req('/data', { method: 'GET' });
+      if (j.data) {
+        const cloudT = j.data._t || 0;
+        const localT = parseInt(localStorage.getItem('app_last_sync') || '0');
+        if (cloudT > localT) {
+          this._apply(j.data);
+          localStorage.setItem('app_last_sync', String(cloudT));
           this.updateStatus('online');
-          return true; // data was updated
+          return true; // data updated
         }
       } else {
         // 云端还没有数据（首次登录）：把本地已有数据迁移上去
@@ -136,6 +144,7 @@ const CloudSync = {
       this.updateStatus('online');
       return false;
     } catch(e) {
+      if (e.status === 401) { await this.logout(); }
       console.error('pull failed', e);
       this.updateStatus('error');
       return null;
@@ -143,40 +152,16 @@ const CloudSync = {
   },
 
   async push() {
-    const user = this.user();
-    if (!user) return;
+    if (!this.user()) return;
     try {
       this.updateStatus('syncing');
-      const plannerData = {
-        activities: JSON.parse(localStorage.getItem('planner_activities') || '[]'),
-        logs: JSON.parse(localStorage.getItem('planner_logs') || '{}'),
-        notes: JSON.parse(localStorage.getItem('planner_notes') || '{}'),
-        profile: JSON.parse(localStorage.getItem('planner_profile') || '{}')
-      };
-      const healthDataObj = {};
-      ['weight','diet','exercise','goals','profile'].forEach(k => {
-        try { healthDataObj[k] = JSON.parse(localStorage.getItem(`health_${k}`) || 'null'); } catch {}
-      });
-      let aiPlan = null;
-      try { aiPlan = JSON.parse(localStorage.getItem('app_ai_plan') || 'null'); } catch {}
-
-      const query = new AV.Query('AppData');
-      query.equalTo('owner', user);
-      let obj = await query.first();
-      if (!obj) {
-        obj = new AV.Object('AppData');
-        obj.set('owner', user);
-        const acl = new AV.ACL(user); // 仅本人可读写
-        obj.setACL(acl);
-      }
-      obj.set('plannerData', plannerData);
-      obj.set('healthData', healthDataObj);
-      if (aiPlan) obj.set('aiPlan', aiPlan);
-      await obj.save();
-      localStorage.setItem('app_last_sync', Date.now().toString());
+      const data = this._collect();
+      await this._req('/data', { method: 'PUT', body: JSON.stringify({ data }) });
+      localStorage.setItem('app_last_sync', String(data._t));
       localStorage.removeItem('app_sync_dirty');
       this.updateStatus('online');
     } catch(e) {
+      if (e.status === 401) { await this.logout(); }
       console.error('push failed', e);
       localStorage.setItem('app_sync_dirty', '1');
       this.updateStatus('error');
@@ -379,7 +364,7 @@ function renderProfilePage() {
               <button class="btn-cloud-sync" id="btnSignup">注册新账号</button>
             </div>
           ` : `
-            <div style="font-size:13px;color:var(--text3)">云同步未配置：请在 js/cloud-config.js 填入 LeanCloud 应用凭证（见 docs/部署指南.md）。</div>
+            <div style="font-size:13px;color:var(--text3)">云同步需要通过网址访问才能使用（本地双击打开文件无法登录）。请用部署后的网址打开本应用。</div>
           `}
         </div>
       </div>
